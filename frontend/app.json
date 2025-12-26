@@ -1,0 +1,75 @@
+{
+  "expo": {
+    "name": "GINGR",
+    "slug": "gingr",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "gingr",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/images/splash-image.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#000"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.gingr.app",
+      "buildNumber": "1.0.0",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "This app needs access to your microphone for Sing Along feature.",
+        "NSCameraUsageDescription": "This app needs access to your camera for video features."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/adaptive-icon.png",
+        "backgroundColor": "#000"
+      },
+      "package": "com.gingr.app",
+      "versionCode": 1,
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.RECORD_AUDIO"
+      ],
+      "edgeToEdgeEnabled": true
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static",
+      "favicon": "./assets/images/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/splash-image.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#000"
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "EXPO_PUBLIC_BACKEND_URL": "http://localhost:3001",
+      "EXPO_PUBLIC_FIREBASE_API_KEY": "AIzaSyDBo7cnGRmuDa-zT2wV413pwSpY5HbZnVI",
+      "EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN": "gingr-13c0c.firebaseapp.com",
+      "EXPO_PUBLIC_FIREBASE_PROJECT_ID": "gingr-13c0c",
+      "EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET": "gingr-13c0c.firebasestorage.app",
+      "EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID": "471244536424",
+      "EXPO_PUBLIC_FIREBASE_APP_ID": "1:471244536424:web:028901627db4e7932b99dd",
+      "EXPO_PUBLIC_SUPABASE_URL": "https://fizsmbdgeaeqttcazhrr.supabase.co",
+      "EXPO_PUBLIC_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZpenNtYmRnZWFlcXR0Y2F6aHRyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjY0Nzk5OTAsImV4cCI6MjA4MjA1NTk5MH0.tmF1E_vLLR_xxuGYnVWJsN_e7OuJI6xG_c6kZ0Tm-y0",
+      "eas": {
+        "projectId": "fizsmbdgeaeqttcazhrr"
+      }
+    }
+  }
+}
+  
