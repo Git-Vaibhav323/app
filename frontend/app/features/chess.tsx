@@ -24,6 +24,7 @@ import { useRouter, Redirect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuthStore } from '../../store/authStore';
 import engageService from '../../services/engageService';
+import chessApiService from '../../services/chessApiService';
 
 type GameState = 'idle' | 'waiting' | 'active' | 'finished';
 type PlayerColor = 'white' | 'black' | null;
@@ -51,6 +52,8 @@ export default function ChessScreen() {
       if (socketRef.current) {
         engageService.disconnectPlayAlong();
       }
+      // Stop polling when component unmounts
+      chessApiService.stopPolling();
     };
   }, []);
 
@@ -142,62 +145,43 @@ export default function ChessScreen() {
     }
 
     try {
-      const socket = engageService.connectPlayAlong(token, user.id);
-      socketRef.current = socket;
+      console.log('[Chess] Creating game room via REST API...');
+      
+      // Use REST API instead of Socket.IO
+      const result = await chessApiService.createRoom(user.id);
+      
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to create game room');
+      }
 
-      await new Promise((resolve, reject) => {
-        if (socket.connected) {
-          console.log('[Chess] Socket already connected');
-          resolve(null);
-          return;
+      if (!result.roomId || !result.roomCode) {
+        throw new Error('Invalid response from server');
+      }
+
+      console.log(`[Chess] ✅ Room created: ${result.roomId} (Code: ${result.roomCode})`);
+      
+      // Update state
+      setRoomId(result.roomId);
+      setRoomCode(result.roomCode);
+      setFen(result.fen || '');
+      setPlayerColor('white');
+      setCurrentTurn(result.turn || 'white');
+      setGameState(result.status === 'active' ? 'active' : 'waiting');
+      
+      // Start polling for updates
+      chessApiService.startPolling(result.roomId, (data) => {
+        console.log('[Chess] Room update:', data);
+        if (data.fen) setFen(data.fen);
+        if (data.turn) setCurrentTurn(data.turn);
+        if (data.status) {
+          setGameState(data.status === 'active' ? 'active' : data.status === 'finished' ? 'finished' : 'waiting');
         }
-
-        const timeout = setTimeout(() => {
-          console.error('[Chess] Connection timeout after 30 seconds');
-          socket.disconnect();
-          reject(new Error('Connection timeout. Make sure:\n\n1. Only ONE Engage server is running on port 3002\n2. Server is accessible at http://localhost:3002\n3. Check browser console for connection errors'));
-        }, 30000); // 30 seconds timeout (matches client config)
-
-        const connectHandler = () => {
-          console.log('[Chess] Socket connected successfully');
-          clearTimeout(timeout);
-          socket.off('connect', connectHandler);
-          socket.off('connect_error', errorHandler);
-          socket.off('connected', connectedHandler);
-          socket.off('server_ready', serverReadyHandler);
-          resolve(null);
-        };
-
-        const connectedHandler = (data: any) => {
-          console.log('[Chess] Server confirmed connection:', data);
-          // Connection is confirmed, but wait for 'connect' event
-        };
-
-        const serverReadyHandler = (data: any) => {
-          console.log('[Chess] Server ready:', data);
-          // Fast acknowledgment - server is ready to accept commands
-          // Still wait for 'connect' event for full connection
-        };
-
-        const errorHandler = (error: any) => {
-          console.error('[Chess] Connection error:', error);
-          clearTimeout(timeout);
-          socket.off('connect', connectHandler);
-          socket.off('connect_error', errorHandler);
-          socket.off('connected', connectedHandler);
-          reject(new Error(error.message || 'Failed to connect to game server. Make sure the Engage server is running on port 3002 and was restarted after code changes.'));
-        };
-
-        socket.once('connect', connectHandler);
-        socket.once('connect_error', errorHandler);
-        socket.once('connected', connectedHandler);
-        socket.once('server_ready', serverReadyHandler);
-      });
-
-      // Set up listeners after connection is established
-      setupSocketListeners(socket);
-
-      socket.emit('create_chess_room');
+        if (data.winner) setWinner(data.winner);
+        if (data.blackPlayer && !playerColor) {
+          setPlayerColor('white'); // Creator is always white
+        }
+      }, 2000); // Poll every 2 seconds
+      
     } catch (error: any) {
       console.error('[Chess] Create game error:', error);
       Alert.alert(
@@ -208,7 +192,9 @@ export default function ChessScreen() {
   };
 
   const handleJoinGame = async () => {
-    if (!roomCode || roomCode.trim().length !== 6) {
+    const codeToJoin = roomCode?.trim() || '';
+    
+    if (!codeToJoin || codeToJoin.length !== 6) {
       Alert.alert('Error', 'Please enter a valid 6-digit room code');
       return;
     }
@@ -219,36 +205,42 @@ export default function ChessScreen() {
     }
 
     try {
-      const socket = engageService.connectPlayAlong(token, user.id);
-      socketRef.current = socket;
+      console.log(`[Chess] Joining game room with code: ${codeToJoin}`);
+      
+      // Use REST API instead of Socket.IO
+      const result = await chessApiService.joinRoom(user.id, codeToJoin);
+      
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to join game room');
+      }
 
-      await new Promise((resolve, reject) => {
-        if (socket.connected) {
-          resolve(null);
-          return;
+      if (!result.roomId) {
+        throw new Error('Invalid response from server');
+      }
+
+      console.log(`[Chess] ✅ Joined room: ${result.roomId}`);
+      
+      // Update state
+      setRoomId(result.roomId);
+      setRoomCode(result.roomCode || codeToJoin);
+      setFen(result.fen || '');
+      setPlayerColor(result.blackPlayer === user.id ? 'black' : 'white');
+      setCurrentTurn(result.turn || 'white');
+      setGameState(result.status === 'active' ? 'active' : 'waiting');
+      
+      // Start polling for updates
+      chessApiService.startPolling(result.roomId, (data) => {
+        console.log('[Chess] Room update:', data);
+        if (data.fen) setFen(data.fen);
+        if (data.turn) setCurrentTurn(data.turn);
+        if (data.status) {
+          setGameState(data.status === 'active' ? 'active' : data.status === 'finished' ? 'finished' : 'waiting');
         }
-
-        const timeout = setTimeout(() => {
-          reject(new Error('Connection timeout'));
-        }, 10000);
-
-        socket.once('connect', () => {
-          clearTimeout(timeout);
-          resolve(null);
-        });
-
-        socket.once('connect_error', (error) => {
-          clearTimeout(timeout);
-          reject(error);
-        });
-      });
-
-      // Set up listeners after connection is established
-      setupSocketListeners(socket);
-
-      // Send roomCode to server - server will look it up
-      socket.emit('join_chess_room', { roomCode: roomCode.trim().toUpperCase() });
+        if (data.winner) setWinner(data.winner);
+      }, 2000); // Poll every 2 seconds
+      
     } catch (error: any) {
+      console.error('[Chess] Join game error:', error);
       Alert.alert('Error', error.message || 'Failed to join game');
     }
   };

@@ -24,10 +24,22 @@ const { Chess } = require('chess.js');
 // EXPRESS SETUP
 // ====================================
 const app = express();
+
+// CORS middleware - must be before routes
 app.use(cors({
   origin: '*',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-User-Id'],
   credentials: true,
 }));
+
+// Handle preflight requests
+app.options('*', (req, res) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-User-Id');
+  res.sendStatus(200);
+});
 
 // Health check endpoint
 app.get('/', (req, res) => {
@@ -35,7 +47,7 @@ app.get('/', (req, res) => {
     status: 'ok', 
     server: 'Engage Socket.IO Server',
     port: process.env.ENGAGE_PORT || 3002,
-    redis: redisClient.isReady ? 'connected' : 'disconnected'
+    redis: redisClient?.isReady ? 'connected' : 'disconnected'
   });
 });
 
@@ -44,9 +56,326 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     namespaces: ['/watch-along', '/play-along', '/sing-along'],
-    redis: redisClient.isReady ? 'connected' : 'disconnected'
+    redis: redisClient?.isReady ? 'connected' : 'disconnected'
   });
 });
+
+// Socket.IO polling endpoint test (for debugging)
+app.get('/socket.io-test', (req, res) => {
+  res.json({ 
+    message: 'Socket.IO server is running',
+    namespaces: ['/watch-along', '/play-along', '/sing-along'],
+    transports: ['websocket', 'polling']
+  });
+});
+
+// ====================================
+// REST API ENDPOINTS (Alternative to Socket.IO)
+// ====================================
+app.use(express.json());
+
+// Handle direct access to Socket.IO namespaces (return helpful message)
+app.get('/play-along', (req, res) => {
+  res.json({
+    message: 'This is a Socket.IO namespace, not a REST endpoint',
+    info: 'Use REST API endpoints instead:',
+    endpoints: {
+      create: 'POST /api/chess/create',
+      join: 'POST /api/chess/join',
+      status: 'GET /api/chess/room/:roomId'
+    }
+  });
+});
+
+// Create chess room (REST API) - SIMPLIFIED & ROBUST
+app.post('/api/chess/create', async (req, res) => {
+  try {
+    console.log('[REST API] Creating chess room...');
+    const userId = req.body.userId || req.headers['x-user-id'] || `user_${Date.now()}`;
+    
+    // Generate room ID (simple, no dependencies)
+    const roomId = `room_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    
+    // Generate 6-digit room code (simple, no Redis dependency)
+    let roomCode = '';
+    for (let i = 0; i < 6; i++) {
+      roomCode += Math.floor(Math.random() * 10).toString();
+    }
+    
+    // Create chess game (with error handling)
+    let initialFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'; // Default starting position
+    try {
+      const game = new Chess();
+      initialFen = game.fen();
+    } catch (chessError) {
+      console.warn('[REST API] ⚠️ Chess.js error, using default FEN:', chessError.message);
+      // Continue with default FEN
+    }
+    
+    const roomData = {
+      roomId,
+      roomCode,
+      whitePlayer: userId,
+      blackPlayer: null,
+      fen: initialFen,
+      turn: 'white',
+      status: 'waiting',
+      winner: null,
+      createdAt: new Date().toISOString(),
+    };
+
+    // Store in Redis if available (non-blocking)
+    let storedInRedis = false;
+    if (redisClient && typeof redisClient.isReady === 'function' && redisClient.isReady()) {
+      try {
+        await redisClient.setEx(`chess:room:${roomId}`, 3600, JSON.stringify(roomData));
+        await redisClient.setEx(`chess:code:${roomCode}`, 3600, roomId);
+        storedInRedis = true;
+        console.log(`[REST API] ✅ Room stored in Redis: ${roomId}`);
+      } catch (redisError) {
+        // Suppress NOAUTH errors (expected if Redis requires password)
+        const errorMsg = redisError.message || '';
+        if (!errorMsg.includes('NOAUTH') && !errorMsg.includes('Authentication')) {
+          console.warn('[REST API] ⚠️ Redis storage failed, but room created:', errorMsg);
+        }
+        // Continue anyway - room is still created
+      }
+    }
+    
+    // ALWAYS store in memory cache as fallback
+    roomCache.set(roomId, roomData);
+    roomCodeCache.set(roomCode, roomId);
+    console.log(`[REST API] ✅ Room stored in memory cache: ${roomId}${storedInRedis ? ' (also in Redis)' : ' (Redis unavailable)'}`);
+
+    console.log(`[REST API] ✅ Chess room created: ${roomId} (Code: ${roomCode}) by ${userId}`);
+    res.json({ success: true, ...roomData });
+  } catch (error) {
+    console.error('[REST API] ❌ Error creating chess room:', error);
+    console.error('[REST API] Error stack:', error.stack);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message || 'Failed to create game room',
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
+
+// Join chess room (REST API) - SIMPLIFIED
+app.post('/api/chess/join', async (req, res) => {
+  try {
+    const userId = req.body.userId || req.headers['x-user-id'] || 'anonymous';
+    const { roomCode, roomId } = req.body;
+
+    let actualRoomId = roomId;
+
+    // If roomCode provided, look up roomId from Redis
+    if (!actualRoomId && roomCode) {
+      const normalizedCode = roomCode.trim();
+      if (redisClient && typeof redisClient.isReady === 'function' && redisClient.isReady()) {
+        try {
+          actualRoomId = await redisClient.get(`chess:code:${normalizedCode}`);
+        } catch (redisError) {
+          console.warn('[REST API] ⚠️ Redis lookup failed:', redisError.message);
+        }
+      }
+      
+      if (!actualRoomId) {
+        return res.status(404).json({ success: false, error: 'Invalid room code. Room may have expired or Redis is unavailable.' });
+      }
+    }
+
+    if (!actualRoomId) {
+      return res.status(400).json({ success: false, error: 'Room ID or code is required' });
+    }
+
+    // Get room data from Redis or memory cache
+    let roomDataStr = null;
+    if (redisClient && typeof redisClient.isReady === 'function' && redisClient.isReady()) {
+      try {
+        roomDataStr = await redisClient.get(`chess:room:${actualRoomId}`);
+      } catch (redisError) {
+        // Suppress auth errors
+      }
+    }
+    
+    // If not in Redis, try memory cache
+    if (!roomDataStr) {
+      const cachedRoom = roomCache.get(actualRoomId);
+      if (cachedRoom) {
+        roomDataStr = JSON.stringify(cachedRoom);
+      }
+    }
+    
+    if (!roomDataStr) {
+      return res.status(404).json({ success: false, error: 'Room not found. It may have expired.' });
+    }
+
+    let roomData;
+    try {
+      roomData = JSON.parse(roomDataStr);
+    } catch (parseError) {
+      console.error('[REST API] ❌ Failed to parse room data:', parseError);
+      return res.status(500).json({ success: false, error: 'Invalid room data' });
+    }
+    
+    // Check if user is already in the room
+    if (roomData.whitePlayer === userId) {
+      return res.json({ success: true, ...roomData, isRejoin: true });
+    }
+    
+    if (roomData.blackPlayer) {
+      if (roomData.blackPlayer === userId) {
+        return res.json({ success: true, ...roomData, isRejoin: true });
+      } else {
+        return res.status(403).json({ success: false, error: 'Room is full' });
+      }
+    }
+
+    // Assign black player
+    roomData.blackPlayer = userId;
+    roomData.status = 'active';
+    
+    // Update Redis if available
+    if (redisClient && typeof redisClient.isReady === 'function' && redisClient.isReady()) {
+      try {
+        await redisClient.setEx(`chess:room:${actualRoomId}`, 3600, JSON.stringify(roomData));
+      } catch (redisError) {
+        // Suppress NOAUTH errors (expected if Redis requires password)
+        const errorMsg = redisError.message || '';
+        if (!errorMsg.includes('NOAUTH') && !errorMsg.includes('Authentication')) {
+          console.warn('[REST API] ⚠️ Redis update failed:', errorMsg);
+        }
+        // Continue anyway - room state updated in memory
+      }
+    }
+    
+    // ALWAYS update memory cache
+    roomCache.set(actualRoomId, roomData);
+    if (roomData.roomCode) {
+      roomCodeCache.set(roomData.roomCode, actualRoomId);
+    }
+
+    console.log(`[REST API] ✅ User ${userId} joined room ${actualRoomId} (black) - Code: ${roomData.roomCode}`);
+    res.json({ success: true, ...roomData });
+  } catch (error) {
+    console.error('[REST API] ❌ Error joining chess room:', error);
+    console.error('[REST API] Error stack:', error.stack);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message || 'Failed to join game room',
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
+
+// Get room status (REST API) - SIMPLIFIED & ROBUST
+app.get('/api/chess/room/:roomId', async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    console.log(`[REST API] Getting room status for: ${roomId}`);
+    
+    if (!roomId || roomId.trim() === '') {
+      return res.status(400).json({ success: false, error: 'Room ID is required' });
+    }
+    
+    let roomDataStr = null;
+    
+    // Try to get from Redis (with auth error handling)
+    if (redisClient) {
+      try {
+        // Check if Redis is ready
+        const isReady = typeof redisClient.isReady === 'function' 
+          ? redisClient.isReady() 
+          : (redisClient.isReady === true);
+        
+        if (isReady) {
+          roomDataStr = await redisClient.get(`chess:room:${roomId}`);
+          if (roomDataStr) {
+            console.log(`[REST API] ✅ Found room in Redis: ${roomId}`);
+          }
+        } else {
+          // Redis not ready - don't log every time (too noisy)
+        }
+      } catch (redisError) {
+        // Don't spam logs with auth errors - only log once per minute
+        const errorMsg = redisError.message || '';
+        if (errorMsg.includes('NOAUTH') || errorMsg.includes('Authentication')) {
+          // Auth error - Redis needs password but we don't have it configured
+          // Silently fail - room won't be found in Redis
+        } else {
+          // Other errors - log once
+          console.warn(`[REST API] ⚠️ Redis get failed for ${roomId}:`, errorMsg);
+        }
+        // Continue - room might not be in Redis
+      }
+    }
+    
+    // If not found in Redis, try memory cache
+    if (!roomDataStr) {
+      const cachedRoom = roomCache.get(roomId);
+      if (cachedRoom) {
+        roomDataStr = JSON.stringify(cachedRoom);
+        console.log(`[REST API] ✅ Found room in memory cache: ${roomId}`);
+      }
+    }
+    
+    // If still not found, return 404
+    if (!roomDataStr) {
+      console.log(`[REST API] ❌ Room not found: ${roomId}`);
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Room not found. It may have expired.' 
+      });
+    }
+
+    // Parse room data
+    let roomData;
+    try {
+      roomData = JSON.parse(roomDataStr);
+      console.log(`[REST API] ✅ Room data parsed successfully: ${roomId}`);
+    } catch (parseError) {
+      console.error(`[REST API] ❌ Failed to parse room data for ${roomId}:`, parseError);
+      return res.status(500).json({ 
+        success: false, 
+        error: 'Invalid room data format',
+        details: parseError.message
+      });
+    }
+    
+    // Return room data
+    res.json({ success: true, ...roomData });
+  } catch (error) {
+    console.error(`[REST API] ❌ Error getting room status:`, error);
+    console.error(`[REST API] Error stack:`, error.stack);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message || 'Failed to get room status',
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
+
+// ====================================
+// IN-MEMORY ROOM CACHE (Fallback when Redis unavailable)
+// ====================================
+const roomCache = new Map(); // roomId -> roomData
+const roomCodeCache = new Map(); // roomCode -> roomId
+
+// Clean up expired rooms every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [roomId, roomData] of roomCache.entries()) {
+    const createdAt = new Date(roomData.createdAt).getTime();
+    const age = now - createdAt;
+    // Remove rooms older than 1 hour
+    if (age > 3600000) {
+      roomCache.delete(roomId);
+      if (roomData.roomCode) {
+        roomCodeCache.delete(roomData.roomCode);
+      }
+    }
+  }
+}, 300000); // 5 minutes
 
 const server = http.createServer(app);
 
@@ -61,8 +390,11 @@ const io = new Server(server, {
     methods: ['GET', 'POST'],
     credentials: true,
   },
+  // Support both transports (client can choose)
   transports: ['websocket', 'polling'],
   allowUpgrades: true,
+  // Better WebSocket support
+  perMessageDeflation: false,
   // Optimized for 1000+ concurrent users
   pingTimeout: 60000,
   pingInterval: 25000,
@@ -80,6 +412,7 @@ const io = new Server(server, {
 const redisClient = redis.createClient({
   host: process.env.REDIS_HOST || 'localhost',
   port: process.env.REDIS_PORT || 6379,
+  password: process.env.REDIS_PASSWORD || undefined, // Add password if configured
   socket: {
     reconnectStrategy: (retries) => {
       if (retries > 10) {

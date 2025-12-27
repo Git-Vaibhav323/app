@@ -65,57 +65,61 @@ class EngageService {
    * Initialize connection to a namespace
    */
   private connectToNamespace(namespace: string, token: string, userId: string): Namespace {
-    const url = `${this.backendUrl}${namespace}`;
-    console.log(`[EngageService] Connecting to ${namespace} at ${url}...`);
+    // CORRECT: Connect directly to namespace URL
+    // Socket.IO client handles this correctly: http://localhost:3002/play-along
+    const namespaceUrl = `${this.backendUrl}${namespace}`;
+    console.log(`[EngageService] Connecting to namespace ${namespace} at ${namespaceUrl}...`);
 
-    const socket = io(url, {
-      // For React Native/Expo web, polling is more reliable initially
-      transports: ['polling', 'websocket'],
-      upgrade: true, // Allow upgrade from polling to WebSocket
+    // ALTERNATIVE: Use WebSocket-only transport (no polling)
+    // This avoids xhr poll errors completely
+    const namespaceSocket = io(namespaceUrl, {
+      // Force WebSocket-only - no polling fallback
+      transports: ['websocket'],
+      upgrade: false, // Disable upgrade attempts
       reconnection: true,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
-      reconnectionAttempts: 5,
-      // Increased timeout to match server (server is 45s, we use 30s for safety)
-      timeout: 30000,
-      connectTimeout: 30000,
+      reconnectionAttempts: 10, // More retries for WebSocket
+      // Shorter timeout for WebSocket (fails faster if not available)
+      timeout: 20000,
+      connectTimeout: 20000,
       auth: {
         token,
         userId,
       },
-      forceNew: true, // Force new connection to avoid stale connections
+      forceNew: true, // Force new connection
       autoConnect: true,
-      // Additional options for better compatibility
-      rememberUpgrade: true,
+      // WebSocket-specific options
+      rememberUpgrade: false,
     });
 
-    socket.on('connect', () => {
-      console.log(`[EngageService] ✅ Connected to ${namespace}`);
+    // Namespace-specific listeners
+    namespaceSocket.on('connect', () => {
+      console.log(`[EngageService] ✅ Connected to namespace ${namespace}`);
     });
 
-    socket.on('connect_error', (error) => {
-      console.error(`[EngageService] ❌ Connection error to ${namespace}:`, error.message || error);
+    namespaceSocket.on('connect_error', (error) => {
+      console.error(`[EngageService] ❌ Namespace ${namespace} connection error:`, error.message || error);
     });
 
-    socket.on('disconnect', (reason) => {
-      console.log(`[EngageService] ❌ Disconnected from ${namespace}: ${reason}`);
+    namespaceSocket.on('disconnect', (reason) => {
+      console.log(`[EngageService] ❌ Disconnected from namespace ${namespace}: ${reason}`);
     });
 
-    socket.on('connected', (data) => {
+    namespaceSocket.on('connected', (data) => {
       console.log(`[EngageService] ✅ Server confirmed connection to ${namespace}:`, data);
     });
 
-    // New: Server-ready event (fast acknowledgment)
-    socket.on('server_ready', (data) => {
+    // Server-ready event (fast acknowledgment)
+    namespaceSocket.on('server_ready', (data) => {
       console.log(`[EngageService] ✅ Server ready for ${namespace}:`, data);
     });
 
-    // Add error handler for better debugging
-    socket.on('error', (error) => {
+    namespaceSocket.on('error', (error) => {
       console.error(`[EngageService] ❌ Socket error on ${namespace}:`, error);
     });
 
-    return socket;
+    return namespaceSocket;
   }
 
   /**
