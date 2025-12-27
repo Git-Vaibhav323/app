@@ -32,7 +32,8 @@ const firebaseConfig = {
   messagingSenderId: getConfigValue('EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID') || '471244536424',
   appId: getConfigValue('EXPO_PUBLIC_FIREBASE_APP_ID') || '1:471244536424:web:028901627db4e7932b99dd',
   // Database URL for Realtime Database (required for Skip On chat)
-  databaseURL: getConfigValue('EXPO_PUBLIC_FIREBASE_DATABASE_URL') || 'https://gingr-13c0c-default-rtdb.firebaseio.com/',
+  // Use the correct region URL to avoid warnings
+  databaseURL: getConfigValue('EXPO_PUBLIC_FIREBASE_DATABASE_URL') || 'https://gingr-13c0c-default-rtdb.asia-southeast1.firebasedatabase.app/',
 };
 
 // Debug: Log what we're reading (only in development)

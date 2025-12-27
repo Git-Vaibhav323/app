@@ -7,11 +7,13 @@ import Constants from 'expo-constants';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { ENABLE_DEMO_MODE } from '../config/demo';
 
-// Get backend URL and force port 3001 if 8001 is detected
+// Get backend URL from environment
 let API_URL = Constants.expoConfig?.extra?.EXPO_PUBLIC_BACKEND_URL || process.env.EXPO_PUBLIC_BACKEND_URL;
-if (API_URL && API_URL.includes(':8001')) {
-  API_URL = API_URL.replace(':8001', ':3001');
-  console.warn('⚠️ Detected port 8001, forcing to 3001:', API_URL);
+if (!API_URL) {
+  API_URL = 'http://localhost:3003';
+  console.warn('⚠️ No backend URL configured, using default:', API_URL);
+} else {
+  console.log('✅ Backend URL configured:', API_URL);
 }
 
 async function makeRequest(method: string, url: string, data: any, baseConfig: any, requestConfig: any) {
@@ -63,8 +65,8 @@ async function makeRequest(method: string, url: string, data: any, baseConfig: a
     
     if (ENABLE_DEMO_MODE && isNetworkError) {
       console.log('Demo mode: Backend not available, using mock data');
-      console.error('⚠️ Backend connection failed. Make sure FastAPI server is running on port 3001');
-      console.error('   Start with: cd backend && uvicorn server:socket_app --host 0.0.0.0 --port 3001 --reload');
+      console.error(`⚠️ Backend connection failed. Make sure FastAPI server is running on ${API_URL}`);
+      console.error(`   Start with: cd backend && uvicorn server:socket_app --host 0.0.0.0 --port ${new URL(API_URL).port || 3003} --reload`);
       return { data: null, status: 200, statusText: 'OK' };
     }
     throw error;

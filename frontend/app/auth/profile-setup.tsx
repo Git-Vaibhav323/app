@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -42,6 +42,7 @@ export default function ProfileSetupScreen() {
   const [loading, setLoading] = useState(false);
   const [showGenderPicker, setShowGenderPicker] = useState(false);
   const { width } = useWindowDimensions();
+  const pickerRef = useRef<View>(null);
   
   // Responsive calculations
   const isSmallScreen = width < 375;
@@ -68,6 +69,38 @@ export default function ProfileSetupScreen() {
     setGender(value);
     closeDropdown();
   };
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    if (!showGenderPicker) return;
+
+    const handleClickOutside = (event: any) => {
+      if (Platform.OS === 'web') {
+        const target = event.target as HTMLElement;
+        const pickerElement = pickerRef.current as any;
+        if (pickerElement && pickerElement._nativeNode) {
+          const nativeNode = pickerElement._nativeNode;
+          if (!nativeNode.contains(target)) {
+            closeDropdown();
+          }
+        }
+      }
+    };
+
+    // Use setTimeout to avoid immediate closure
+    const timeoutId = setTimeout(() => {
+      if (Platform.OS === 'web') {
+        document.addEventListener('mousedown', handleClickOutside);
+      }
+    }, 100);
+
+    return () => {
+      clearTimeout(timeoutId);
+      if (Platform.OS === 'web') {
+        document.removeEventListener('mousedown', handleClickOutside);
+      }
+    };
+  }, [showGenderPicker]);
 
   const handleSaveProfile = async () => {
     if (!name.trim()) {
@@ -190,7 +223,7 @@ export default function ProfileSetupScreen() {
                 </View>
 
                 {/* Gender Picker */}
-                <View style={styles.pickerContainer}>
+                <View style={styles.pickerContainer} ref={pickerRef}>
                   <Pressable
                     style={styles.pickerButton}
                     onPress={openDropdown}
@@ -207,40 +240,30 @@ export default function ProfileSetupScreen() {
                   </Pressable>
 
                   {showGenderPicker && (
-                    <>
-                      <Pressable
-                        style={styles.dropdownBackdrop}
-                        onPress={closeDropdown}
-                      />
-                      <View style={styles.dropdownContainer}>
-                        {genderOptions.map((option) => (
-                          <Pressable
-                            key={option.value}
-                            style={({ pressed }) => [
-                              styles.dropdownOption,
-                              gender === option.value && styles.dropdownOptionSelected,
-                              pressed && styles.dropdownOptionPressed,
+                    <View style={styles.dropdownContainer}>
+                      {genderOptions.map((option) => (
+                        <Pressable
+                          key={option.value}
+                          style={[
+                            styles.dropdownOption,
+                            gender === option.value && styles.dropdownOptionSelected,
+                          ]}
+                          onPress={() => handleGenderSelect(option.value)}
+                        >
+                          <Text
+                            style={[
+                              styles.dropdownOptionText,
+                              gender === option.value && styles.dropdownOptionTextSelected,
                             ]}
-                            onPress={() => {
-                              handleGenderSelect(option.value);
-                            }}
-                            android_ripple={{ color: 'rgba(255, 255, 255, 0.1)' }}
                           >
-                            <Text
-                              style={[
-                                styles.dropdownOptionText,
-                                gender === option.value && styles.dropdownOptionTextSelected,
-                              ]}
-                            >
-                              {option.label}
-                            </Text>
-                            {gender === option.value && (
-                              <Ionicons name="checkmark" size={20} color="#4A90E2" />
-                            )}
-                          </Pressable>
-                        ))}
-                      </View>
-                    </>
+                            {option.label}
+                          </Text>
+                          {gender === option.value && (
+                            <Ionicons name="checkmark" size={20} color="#4A90E2" />
+                          )}
+                        </Pressable>
+                      ))}
+                    </View>
                   )}
                 </View>
 
@@ -404,7 +427,7 @@ const styles = StyleSheet.create({
         elevation: 10,
       },
       web: {
-        boxShadow: '0 4px 12px rgba(0, 0, 0, 0.5)',
+        boxShadow: '0 4px 12px rgba(0, 0, 0, 0.3)',
       },
     }),
   },
@@ -415,8 +438,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.md,
     paddingVertical: Spacing.md + 4,
     borderBottomWidth: 0.5,
-    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
-    minHeight: 48,
+    borderBottomColor: 'rgba(255, 255, 255, 0.05)',
   },
   dropdownOptionSelected: {
     backgroundColor: 'rgba(74, 144, 226, 0.15)',

@@ -19,33 +19,20 @@ import { Platform } from 'react-native';
 
 // Get backend URL from environment variables
 const getBackendUrl = (): string => {
-  // Force use port 3001 for Socket.IO server
-  const FORCE_PORT = 3001;
-  
   const expoExtraValue = Constants.expoConfig?.extra?.['EXPO_PUBLIC_BACKEND_URL'];
   if (expoExtraValue && typeof expoExtraValue === 'string' && expoExtraValue.trim() !== '') {
-    let url = expoExtraValue.trim();
-    // Force replace port 8001 with 3001 if found
-    if (url.includes(':8001')) {
-      url = url.replace(':8001', `:${FORCE_PORT}`);
-      console.warn(`⚠️ Detected port 8001, forcing to ${FORCE_PORT}: ${url}`);
-    }
+    const url = expoExtraValue.trim();
     console.log(`📡 Backend URL from app.json: ${url}`);
     return url;
   }
   const envValue = process.env.EXPO_PUBLIC_BACKEND_URL;
   if (envValue && typeof envValue === 'string' && envValue.trim() !== '') {
-    let url = envValue.trim();
-    // Force replace port 8001 with 3001 if found
-    if (url.includes(':8001')) {
-      url = url.replace(':8001', `:${FORCE_PORT}`);
-      console.warn(`⚠️ Detected port 8001, forcing to ${FORCE_PORT}: ${url}`);
-    }
+    const url = envValue.trim();
     console.log(`📡 Backend URL from process.env: ${url}`);
     return url;
   }
-  // Default fallback (development) - ALWAYS use 3001
-  const defaultUrl = `http://localhost:${FORCE_PORT}`;
+  // Default fallback (development)
+  const defaultUrl = 'http://localhost:3003';
   console.log(`📡 Backend URL using default: ${defaultUrl}`);
   return defaultUrl;
 };
@@ -71,7 +58,7 @@ const getPlatformBackendUrl = (): string => {
   
   // For iOS simulator, localhost works
   // For real devices, use your computer's IP address
-  // Example: http://192.168.1.100:3001
+  // Example: http://192.168.1.100:3003
   // You'll need to set this in app.json for production
   
   return baseUrl;

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Header, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, APIRouter, HTTPException, Header, WebSocket, WebSocketDisconnect, Body
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -10,6 +10,7 @@ from datetime import datetime, time, timedelta
 from typing import Optional, List
 import uuid
 import asyncio
+import time as time_module
 
 from models import (
     User, UserCreate, UserUpdate, LoginRequest, OTPVerify, GuestLogin, TokenResponse,
@@ -19,6 +20,9 @@ from models import (
     SkipMatchRequest, SkipLeaveRequest
 )
 from auth import create_access_token, verify_token, get_current_user, otp_store
+from db_config import init_db, close_db, get_db, get_client
+from db_indexes import create_indexes
+from query_optimizer import QueryOptimizer
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -30,22 +34,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# MongoDB connection (with error handling)
-mongo_url = os.environ.get('MONGO_URL')
-if not mongo_url:
-    logger.warning("MONGO_URL not found in environment. Some features may not work.")
-    mongo_url = "mongodb://localhost:27017"  # Default fallback
-    logger.info(f"Using default MongoDB URL: {mongo_url}")
+# MongoDB connection with pooling (initialized on startup)
+client = None
+db = None
 
-try:
-    client = AsyncIOMotorClient(mongo_url)
-    db = client[os.environ.get('DB_NAME', 'skip_on_db')]
-    logger.info("MongoDB connection established")
-except Exception as e:
-    logger.error(f"Failed to connect to MongoDB: {e}")
-    # Create a dummy client to prevent crashes
-    client = None
-    db = None
+def ensure_db():
+    """Ensure database is initialized, raise error if not."""
+    if db is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Database not initialized. Please wait for server startup."
+        )
+    return db
 
 # Create Socket.IO server
 sio = socketio.AsyncServer(
@@ -61,12 +61,8 @@ app = FastAPI()
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
-# Include router BEFORE creating socket_app
-# This ensures routes are accessible through socket_app
-app.include_router(api_router)
-
-# Socket.IO ASGI app (wraps FastAPI app with routes)
-socket_app = socketio.ASGIApp(sio, other_asgi_app=app)
+# Socket.IO ASGI app (will be created after routes are defined)
+# socket_app will be created at the end after all routes are registered
 
 # Logger is already configured above (before MongoDB connection)
 
@@ -134,11 +130,12 @@ async def authenticate(sid, data):
 @sio.event
 async def join_anonymous_chat(sid, data):
     """Join anonymous chat - find or create room"""
-    # Find waiting room or create new one
-    waiting_room = await db.chat_rooms.find_one({
-        "status": RoomStatus.WAITING,
-        "participants": {"$size": 1}
-    })
+    if not db:
+        await sio.emit('error', {'message': 'Database not available'}, room=sid)
+        return
+    
+    # Find waiting room or create new one (optimized query)
+    waiting_room = await QueryOptimizer.find_waiting_chat_room(db.chat_rooms)
     
     if waiting_room:
         # Join existing room
@@ -169,6 +166,9 @@ async def join_anonymous_chat(sid, data):
 @sio.event
 async def send_chat_message(sid, data):
     """Send message in chat room"""
+    if not db:
+        return
+    
     room_id = data.get('room_id')
     message = data.get('message')
     
@@ -246,11 +246,11 @@ async def join_engage(sid, data):
     # Opposite gender for matching
     target_gender = Gender.FEMALE if user_gender == Gender.MALE else Gender.MALE
     
-    # Find waiting user of opposite gender
-    waiting_room = await db.engage_rooms.find_one({
-        "status": RoomStatus.WAITING,
-        "user1_gender": target_gender
-    })
+    # Find waiting user of opposite gender (optimized query)
+    waiting_room = await QueryOptimizer.find_waiting_engage_room(
+        db.engage_rooms,
+        target_gender
+    )
     
     if waiting_room:
         # Match found!
@@ -558,11 +558,13 @@ async def login(request: LoginRequest):
 @api_router.post("/auth/verify-otp", response_model=TokenResponse)
 async def verify_otp(request: OTPVerify):
     """Verify OTP and return token"""
+    ensure_db()  # Ensure database is initialized
+    
     if not otp_store.verify_otp(request.email, request.otp):
         raise HTTPException(status_code=400, detail="Invalid or expired OTP")
     
-    # Find or create user
-    user = await db.users.find_one({"email": request.email})
+    # Find or create user (optimized query)
+    user = await QueryOptimizer.find_user_by_email(db.users, request.email)
     
     if not user:
         # Create new user - they'll complete profile later
@@ -591,8 +593,13 @@ async def verify_otp(request: OTPVerify):
 @api_router.post("/auth/guest-login", response_model=TokenResponse)
 async def guest_login(request: GuestLogin):
     """Login as guest"""
-    # Check if guest exists
-    user = await db.users.find_one({"guest_uuid": request.guest_uuid})
+    ensure_db()  # Ensure database is initialized
+    
+    # Check if guest exists (optimized query)
+    user = await db.users.find_one(
+        {"guest_uuid": request.guest_uuid},
+        projection=QueryOptimizer.get_user_projection()
+    )
     
     if not user:
         # Create guest user
@@ -654,8 +661,12 @@ async def update_profile(update: UserUpdate, authorization: Optional[str] = Head
             {"$set": update_data}
         )
     
-    # Get updated user
-    updated_user = await db.users.find_one({"_id": user['_id']})
+    # Get updated user (optimized query)
+    updated_user = await QueryOptimizer.find_user_by_id(
+        db.users,
+        user['_id'],
+        include_avatar=True  # Include avatar in profile updates
+    )
     return User(**updated_user)
 
 # Friends Routes
@@ -704,10 +715,12 @@ async def get_friends(authorization: Optional[str] = Header(None)):
     if not user:
         raise HTTPException(status_code=401, detail="Invalid token")
     
-    friends = await db.friends.find({
-        "user_id": user['_id'],
-        "status": FriendStatus.ACCEPTED
-    }).to_list(1000)
+    # Get friends list (optimized query)
+    friends = await QueryOptimizer.get_friends_list(
+        db.friends,
+        user['_id'],
+        status=FriendStatus.ACCEPTED
+    )
     
     return {"friends": friends}
 
@@ -738,17 +751,18 @@ async def report_user(report: ReportCreate, authorization: Optional[str] = Heade
 # Watch Rooms
 @api_router.get("/watch/rooms")
 async def get_watch_rooms(authorization: Optional[str] = Header(None)):
-    """Get active watch rooms"""
-    rooms = await db.watch_rooms.find({}).to_list(100)
+    """Get active watch rooms (optimized query)"""
+    rooms = await QueryOptimizer.get_active_watch_rooms(db.watch_rooms)
     return {"rooms": rooms}
 
 # Game Rooms
 @api_router.get("/game/rooms")
 async def get_game_rooms(authorization: Optional[str] = Header(None)):
-    """Get active game rooms"""
-    rooms = await db.game_rooms.find({
-        "status": RoomStatus.WAITING
-    }).to_list(100)
+    """Get active game rooms (optimized query)"""
+    rooms = await QueryOptimizer.get_waiting_game_rooms(
+        db.game_rooms,
+        limit=100
+    )
     return {"rooms": rooms}
 
 # ======================
@@ -762,7 +776,7 @@ skip_user_to_room = {}  # Dict of { userId: roomId }
 
 @api_router.post("/skip/match")
 async def skip_match(
-    request: SkipMatchRequest = SkipMatchRequest(),
+    request: Optional[SkipMatchRequest] = Body(None),
     authorization: Optional[str] = Header(None)
 ):
     """
@@ -775,6 +789,10 @@ async def skip_match(
     - If matched: { status: "matched", roomId, partnerId, isPartnerGuest }
     - If queued: { status: "searching" }
     """
+    logger.info("🔍 Skip On: /skip/match endpoint called")
+    logger.info(f"🔍 Skip On: Request body: {request}")
+    logger.info(f"🔍 Skip On: Authorization header: {authorization[:20] + '...' if authorization and len(authorization) > 20 else authorization}")
+    
     # Get user ID (authenticated or guest)
     userId = None
     isGuest = False
@@ -782,35 +800,102 @@ async def skip_match(
     if authorization and authorization.startswith("Bearer "):
         # Authenticated user
         token = authorization.split(" ")[1]
-        user = await get_current_user(db, token)
-        if user:
-            userId = user['_id']
-            isGuest = user.get('is_guest', False)
+        # Skip database lookup for demo guest tokens (they start with "demo_guest_token_")
+        if token.startswith("demo_guest_token_"):
+            logger.info("🔍 Skip On: Detected demo guest token, skipping database lookup")
+            # Don't set userId here - let it fall through to guestId check
+        else:
+            # Real authenticated user - MongoDB disabled, treat as guest
+            logger.info("🔍 Skip On: Authenticated token detected but MongoDB disabled - treating as guest")
+            # Skip database lookup - MongoDB is disabled
+            # try:
+            #     user = await get_current_user(db, token)
+            #     if user:
+            #         userId = user['_id']
+            #         isGuest = user.get('is_guest', False)
+            #         logger.info(f"🔍 Skip On: Authenticated user found: {userId}")
+            # except Exception as e:
+            #     logger.error(f"🔍 Skip On: Error getting user from token: {e}")
+            # Continue to guestId check
     
     # If no auth token or invalid, check for guestId in request body
     if not userId:
-        if request.guestId:
+        logger.info("🔍 Skip On: No authenticated user, checking for guestId")
+        if request and request.guestId:
             userId = request.guestId
             isGuest = True
+            logger.info(f"🔍 Skip On: Using guestId from request: {userId}")
+        elif request is None or (request and not request.guestId):
+            # Empty body or no guestId - generate a temporary guest ID for this session
+            # This allows the frontend to work even if guestId isn't set yet
+            userId = f"temp_guest_{uuid.uuid4()}"
+            isGuest = True
+            logger.info(f"🔍 Skip On: Generated temporary guest ID: {userId}")
         else:
+            logger.error("🔍 Skip On: No userId and no guestId provided")
             raise HTTPException(status_code=400, detail="Authentication required or guestId must be provided")
     
-    # Remove user from queue if already there
-    skip_matchmaking_queue[:] = [u for u in skip_matchmaking_queue if u['userId'] != userId]
+    logger.info(f"🔍 Skip On: Processing match for userId: {userId}, isGuest: {isGuest}")
     
-    # Remove user from any existing room
+    if not userId:
+        logger.error("🔍 Skip On: No userId after processing, returning error")
+        raise HTTPException(status_code=400, detail="Unable to determine user ID")
+    
+    # IMPORTANT: Check if user is already in a room (matched by another user's request)
+    # This handles the case where User 1 is in queue, User 2 calls match() and gets matched,
+    # but User 1 is still polling and needs to know they're matched
     if userId in skip_user_to_room:
         roomId = skip_user_to_room[userId]
         if roomId in skip_active_rooms:
-            del skip_active_rooms[roomId]
-        del skip_user_to_room[userId]
+            room = skip_active_rooms[roomId]
+            # Get partner ID
+            partnerId = room['user1Id'] if room['user1Id'] != userId else room['user2Id']
+            partnerIsGuest = room['user1IsGuest'] if room['user1Id'] != userId else room['user2IsGuest']
+            
+            logger.info(f"✅ Skip On: User {userId} already in room {roomId} with partner {partnerId}")
+            logger.info(f"✅ Skip On: Returning matched response for existing room")
+            
+            return {
+                "status": "matched",
+                "roomId": roomId,
+                "partnerId": partnerId,
+                "isPartnerGuest": partnerIsGuest
+            }
+        else:
+            # Room doesn't exist, clean up
+            del skip_user_to_room[userId]
     
-    # Check if there's someone waiting
+    # Remove user from queue if they're there (they shouldn't be if they're in a room)
+    skip_matchmaking_queue[:] = [u for u in skip_matchmaking_queue if u['userId'] != userId]
+    
+    # Check if there's someone waiting BEFORE removing ourselves
+    # This prevents race conditions where both users call match() simultaneously
     if len(skip_matchmaking_queue) > 0:
+        # Check if we're already in the queue - if so, don't match with ourselves
+        alreadyInQueue = any(u['userId'] == userId for u in skip_matchmaking_queue)
+        if alreadyInQueue:
+            # We're already in queue, just return searching
+            logger.info(f"🔍 Skip On: User {userId} already in queue, waiting... (queue length: {len(skip_matchmaking_queue)})")
+            logger.info(f"🔍 Skip On: Returning 'searching' status")
+            return {
+                "status": "searching"
+            }
         # Match with first person in queue
         partner = skip_matchmaking_queue.pop(0)
         partnerId = partner['userId']
         partnerIsGuest = partner.get('isGuest', False)
+        
+        # Safety check: prevent matching with yourself
+        if partnerId == userId:
+            logger.warning(f"⚠️ Skip On: Attempted to match user {userId} with themselves, re-adding to queue")
+            skip_matchmaking_queue.append({
+                "userId": userId,
+                "isGuest": isGuest,
+                "timestamp": datetime.utcnow().isoformat()
+            })
+            return {
+                "status": "searching"
+            }
         
         # Create room
         roomId = f"skip_{uuid.uuid4()}"
@@ -825,30 +910,41 @@ async def skip_match(
         skip_user_to_room[userId] = roomId
         
         logger.info(f"✅ Skip On match: Room {roomId} - {partnerId} + {userId}")
+        logger.info(f"✅ Skip On: Returning matched response")
         
-        return {
+        response = {
             "status": "matched",
             "roomId": roomId,
             "partnerId": partnerId,
             "isPartnerGuest": partnerIsGuest
         }
+        logger.info(f"✅ Skip On: Response: {response}")
+        return response
     else:
-        # Add to queue
-        skip_matchmaking_queue.append({
-            "userId": userId,
-            "isGuest": isGuest,
-            "timestamp": datetime.utcnow().isoformat()
-        })
+        # No one waiting - check if we're already in queue
+        alreadyInQueue = any(u['userId'] == userId for u in skip_matchmaking_queue)
         
-        logger.info(f"🔍 Skip On: User {userId} added to queue (queue length: {len(skip_matchmaking_queue)})")
+        if not alreadyInQueue:
+            # Add to queue
+            skip_matchmaking_queue.append({
+                "userId": userId,
+                "isGuest": isGuest,
+                "timestamp": datetime.utcnow().isoformat()
+            })
+            logger.info(f"🔍 Skip On: User {userId} added to queue (queue length: {len(skip_matchmaking_queue)})")
+        else:
+            logger.info(f"🔍 Skip On: User {userId} already in queue (queue length: {len(skip_matchmaking_queue)})")
         
-        return {
+        logger.info(f"🔍 Skip On: Returning searching response")
+        response = {
             "status": "searching"
         }
+        logger.info(f"🔍 Skip On: Response: {response}")
+        return response
 
 @api_router.post("/skip/leave")
 async def skip_leave(
-    request: SkipLeaveRequest = SkipLeaveRequest(),
+    request: Optional[SkipLeaveRequest] = Body(None),
     authorization: Optional[str] = Header(None)
 ):
     """
@@ -868,8 +964,13 @@ async def skip_leave(
     
     # If no auth, check for guestId in request body
     if not userId:
-        if request.guestId:
+        if request and request.guestId:
             userId = request.guestId
+        elif request is None or (request and not request.guestId):
+            # Empty body - this is okay for leave, just return success
+            # The frontend might call this without a guestId if cleanup happens
+            logger.info("🔍 Skip On: Leave called without userId or guestId - no-op")
+            return {"status": "left"}
         else:
             raise HTTPException(status_code=400, detail="Authentication required or guestId must be provided")
     
@@ -940,8 +1041,9 @@ async def skip_status(
     
     return {"status": "idle"}
 
-# Router is already included above (before socket_app creation at line 66)
-# app.include_router(api_router)  # Duplicate - removed
+# Include router AFTER all routes are defined
+# This ensures all routes are registered before including the router
+app.include_router(api_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -951,11 +1053,45 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database connection and indexes on startup."""
+    global client, db
+    
+    # MongoDB disabled - using in-memory storage only
+    logger.info("⚠️ MongoDB disabled - running in memory-only mode")
+    logger.info("⚠️ Skip On matchmaking will work (uses in-memory queue)")
+    logger.info("⚠️ Other features requiring database will not work")
+    client = None
+    db = None
+    
+    # COMMENTED OUT: MongoDB initialization
+    # try:
+    #     # Initialize database with connection pooling
+    #     client, db = await init_db()
+    #     
+    #     # Create indexes in the background (non-blocking)
+    #     logger.info("Creating database indexes...")
+    #     await create_indexes(db)
+    #     logger.info("Database initialization complete!")
+    #     
+    # except Exception as e:
+    #     logger.error(f"⚠️ Failed to initialize database: {e}")
+    #     logger.warning("⚠️ Server will continue without database. Some features may not work.")
+    #     logger.warning("⚠️ To enable full functionality, start MongoDB: brew services start mongodb-community")
+    #     client = None
+    #     db = None
+
 @app.on_event("shutdown")
-async def shutdown_db_client():
-    if client:
-        client.close()
+async def shutdown_event():
+    """Close database connection on shutdown."""
+    # MongoDB disabled - no cleanup needed
+    # await close_db()
+    logger.info("Server shutting down (MongoDB disabled)")
+
+# Create Socket.IO ASGI app AFTER all routes and middleware are configured
+# This wraps the FastAPI app so both Socket.IO and REST API work together
+socket_app = socketio.ASGIApp(sio, other_asgi_app=app)
 
 # Export socket_app for uvicorn
-# Run with: uvicorn server:socket_app --host 0.0.0.0 --port 3001 --reload
-# Note: Port 3001 matches frontend EXPO_PUBLIC_BACKEND_URL configuration
+# Run with: uvicorn server:socket_app --host 0.0.0.0 --port 3003 --reload

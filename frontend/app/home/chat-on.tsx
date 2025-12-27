@@ -57,6 +57,19 @@ export default function ChatOnScreen() {
   const [chatState, setChatState] = useState<ChatState>('idle');
   const flatListRef = useRef<FlatList>(null);
 
+  // Debug: Watch for roomId changes
+  useEffect(() => {
+    if (roomId) {
+      console.log('[ChatOn] ✅ roomId changed to:', roomId);
+      console.log('[ChatOn] Current chatState:', chatState);
+      // Ensure state is set to chatting when roomId is set
+      if (chatState !== 'chatting') {
+        console.log('[ChatOn] ⚠️ roomId set but chatState is not chatting, fixing...');
+        setChatState('chatting');
+      }
+    }
+  }, [roomId, chatState]);
+
   // Get user ID (authenticated or guest)
   const getUserId = async (): Promise<string> => {
     if (user && !user.is_guest && user.id) {
@@ -91,11 +104,37 @@ export default function ChatOnScreen() {
       // Start chat with callbacks
       await skipOnService.startChat(
         userId,
-        // onMatched
+        // onMatched - use functional updates to ensure state updates work
         (foundRoomId: string) => {
           console.log('[ChatOn] 🎉 Match found! Room:', foundRoomId);
-          setRoomId(foundRoomId);
-          setChatState('chatting');
+          console.log('[ChatOn] Current chatState before update:', chatState);
+          console.log('[ChatOn] Setting roomId and chatState to chatting...');
+          
+          // Add a welcome message to show the user they're connected
+          const welcomeMessage: ChatMessage = {
+            message_id: `welcome_${Date.now()}`,
+            message: "You're connected! Say hi 👋",
+            timestamp: new Date().toISOString(),
+            is_self: false,
+          };
+          
+          setMessages([welcomeMessage]);
+          
+          // Use functional updates to ensure React batches these correctly
+          setRoomId((prevRoomId) => {
+            console.log('[ChatOn] setRoomId called, prevRoomId:', prevRoomId, 'newRoomId:', foundRoomId);
+            return foundRoomId;
+          });
+          
+          setChatState((prevState) => {
+            console.log('[ChatOn] setChatState called, prevState:', prevState, 'newState: chatting');
+            return 'chatting';
+          });
+          
+          // Force a re-render check
+          setTimeout(() => {
+            console.log('[ChatOn] After state update - roomId should be:', foundRoomId);
+          }, 100);
         },
         // onMessage
         (message: SkipOnMessage) => {

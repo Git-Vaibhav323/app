@@ -4,11 +4,13 @@ import { ENABLE_DEMO_MODE } from '../config/demo';
 import { Platform } from 'react-native';
 import httpClient from './httpClient';
 
-// Get backend URL and force port 3001 if 8001 is detected
+// Get backend URL from environment
 let API_URL = Constants.expoConfig?.extra?.EXPO_PUBLIC_BACKEND_URL || process.env.EXPO_PUBLIC_BACKEND_URL;
-if (API_URL && API_URL.includes(':8001')) {
-  API_URL = API_URL.replace(':8001', ':3001');
-  console.warn('⚠️ Detected port 8001, forcing to 3001:', API_URL);
+if (!API_URL) {
+  API_URL = 'http://localhost:3003';
+  console.warn('⚠️ No backend URL configured, using default:', API_URL);
+} else {
+  console.log('✅ Backend URL configured:', API_URL);
 }
 
 // Create API instance using platform-appropriate HTTP client
