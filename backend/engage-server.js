@@ -379,6 +379,130 @@ app.get('/api/chess/room/:roomId', async (req, res) => {
   }
 });
 
+// Make chess move (REST API)
+app.post('/api/chess/move', async (req, res) => {
+  try {
+    const userId = req.body.userId || req.headers['x-user-id'] || 'anonymous';
+    const { roomId, from, to, promotion } = req.body;
+
+    if (!roomId || !from || !to) {
+      return res.status(400).json({ success: false, error: 'roomId, from, and to are required' });
+    }
+
+    // Get room data from Redis or memory cache
+    let roomDataStr = null;
+    if (redisClient && typeof redisClient.isReady === 'function' && redisClient.isReady()) {
+      try {
+        roomDataStr = await redisClient.get(`chess:room:${roomId}`);
+      } catch (redisError) {
+        // Suppress auth errors
+      }
+    }
+    
+    // If not in Redis, try memory cache
+    if (!roomDataStr) {
+      const cachedRoom = roomCache.get(roomId);
+      if (cachedRoom) {
+        roomDataStr = JSON.stringify(cachedRoom);
+      }
+    }
+    
+    if (!roomDataStr) {
+      return res.status(404).json({ success: false, error: 'Room not found' });
+    }
+
+    let roomData;
+    try {
+      roomData = JSON.parse(roomDataStr);
+    } catch (parseError) {
+      return res.status(500).json({ success: false, error: 'Invalid room data format' });
+    }
+
+    if (roomData.status !== 'active') {
+      return res.status(400).json({ success: false, error: 'Game is not active' });
+    }
+
+    // Check if it's user's turn
+    const expectedColor = roomData.turn;
+    const userColor = roomData.whitePlayer === userId ? 'white' : roomData.blackPlayer === userId ? 'black' : null;
+    
+    if (!userColor) {
+      return res.status(403).json({ success: false, error: 'You are not a player in this room' });
+    }
+
+    if (userColor !== expectedColor) {
+      return res.status(400).json({ success: false, error: 'Not your turn' });
+    }
+
+    // Validate move using chess.js
+    let game;
+    try {
+      game = new Chess(roomData.fen);
+    } catch (chessError) {
+      console.error('[REST API] Chess.js initialization error:', chessError);
+      return res.status(500).json({ success: false, error: 'Failed to initialize game' });
+    }
+
+    const move = { from, to };
+    if (promotion) {
+      move.promotion = promotion;
+    }
+
+    try {
+      const result = game.move(move);
+      if (!result) {
+        return res.status(400).json({ success: false, error: 'Invalid move' });
+      }
+
+      // Update game state
+      roomData.fen = game.fen();
+      roomData.turn = game.turn() === 'w' ? 'white' : 'black';
+
+      // Check for game end
+      if (game.isCheckmate()) {
+        roomData.status = 'finished';
+        roomData.winner = userColor;
+      } else if (game.isDraw() || game.isStalemate()) {
+        roomData.status = 'finished';
+        roomData.winner = 'draw';
+      }
+
+      // Update Redis if available
+      if (redisClient && typeof redisClient.isReady === 'function' && redisClient.isReady()) {
+        try {
+          await redisClient.setEx(`chess:room:${roomId}`, 3600, JSON.stringify(roomData));
+        } catch (redisError) {
+          // Suppress auth errors
+        }
+      }
+      
+      // ALWAYS update memory cache
+      roomCache.set(roomId, roomData);
+
+      console.log(`[REST API] ♟️ Move in room ${roomId}: ${from}→${to} by ${userColor}`);
+      
+      res.json({
+        success: true,
+        fen: roomData.fen,
+        turn: roomData.turn,
+        status: roomData.status,
+        winner: roomData.winner,
+        move: { from, to, promotion },
+      });
+    } catch (error) {
+      console.error(`[REST API] ❌ Invalid move:`, error);
+      return res.status(400).json({ success: false, error: 'Invalid move: ' + error.message });
+    }
+  } catch (error) {
+    console.error('[REST API] ❌ Error making move:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message || 'Failed to make move',
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
+
 // ====================================
 // IN-MEMORY ROOM CACHE (Fallback when Redis unavailable)
 // ====================================
