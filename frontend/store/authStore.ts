@@ -256,10 +256,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       if (!auth) throw new Error('Firebase auth not initialized');
 
       console.log('🔵 Starting Apple OAuth with Firebase');
+      console.log('🔍 Firebase Auth Debug:', {
+        projectId: auth.app.options.projectId,
+        authDomain: auth.app.options.authDomain,
+        currentUser: auth.currentUser?.uid || 'none',
+      });
 
       if (Platform.OS === 'web') {
         // Web: Use signInWithPopup
         const provider = getAppleProvider();
+        console.log('🔵 Attempting Apple sign-in popup...');
         const result = await signInWithPopup(auth, provider);
         const firebaseUser = result.user;
         const idToken = await firebaseUser.getIdToken();
@@ -277,7 +283,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       
       // Provide helpful error messages
       if (error.code === 'auth/operation-not-allowed') {
-        throw new Error('Apple sign-in is not enabled in Firebase. Go to Firebase Console → Authentication → Sign-in method → Apple → Enable → Save. Wait 2-3 minutes, then try again. See APPLE_SIGNIN_VERIFY.md for verification steps.');
+        console.error('❌ Apple sign-in not enabled. Please verify:');
+        console.error('   1. Go to Firebase Console → Authentication → Sign-in method');
+        console.error('   2. Click on Apple provider (not just toggle)');
+        console.error('   3. Make sure Enable toggle is ON');
+        console.error('   4. Scroll down and click SAVE button');
+        console.error('   5. Wait 5-10 minutes for changes to propagate globally');
+        console.error('   6. Clear browser cache completely (or use incognito mode)');
+        throw new Error('Apple sign-in is not enabled in Firebase. Go to Firebase Console → Authentication → Sign-in method → Apple → Enable → Save. Wait 5-10 minutes for global propagation, then clear cache and try again. See APPLE_SIGNIN_VERIFY.md for verification steps.');
       } else if (error.code === 'auth/popup-closed-by-user') {
         throw new Error('Sign-in cancelled');
       } else if (error.code === 'auth/invalid-client') {
