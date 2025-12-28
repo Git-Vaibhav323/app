@@ -89,8 +89,17 @@ class SkipOnFirebaseService {
         joinedAt: Date.now(),
       });
       
-      // Update user count and check if both users are joined
-      const roomData = existingRoom.val();
+      // CRITICAL: Re-read room data AFTER writing to get fresh state
+      // Firebase writes are eventually consistent, so we need to read again
+      await new Promise(resolve => setTimeout(resolve, 100)); // Small delay for write propagation
+      const freshRoomSnapshot = await get(roomRef);
+      
+      if (!freshRoomSnapshot.exists()) {
+        console.error(`❌ SkipOnFirebase: Room disappeared after join!`);
+        throw new Error('Room not found after join');
+      }
+      
+      const roomData = freshRoomSnapshot.val();
       const users = roomData?.users || {};
       const joinedUsers = Object.keys(users).filter((uid) => {
         const userData = users[uid];
@@ -99,12 +108,16 @@ class SkipOnFirebaseService {
       const userCount = joinedUsers.length;
       
       console.log(`🏗️ SkipOnFirebase: User count after join: ${userCount}`);
+      console.log(`🏗️ SkipOnFirebase: Joined users:`, joinedUsers);
+      console.log(`🏗️ SkipOnFirebase: All users:`, Object.keys(users));
       
       // If both users are now joined, activate room
       if (userCount >= 2) {
         const statusRef = ref(this.db, `skipOnRooms/${roomId}/status`);
         await set(statusRef, 'active');
         console.log(`✅ SkipOnFirebase: Room activated - both users joined`);
+      } else {
+        console.log(`⏳ SkipOnFirebase: Waiting for partner to join (${userCount}/2 users)`);
       }
     } else {
       // Room doesn't exist - create it
@@ -347,7 +360,16 @@ class SkipOnFirebaseService {
       }
       
       // Notify when room is ready (both users joined)
-      if (status === 'active' && userCount >= 2 && onRoomReady) {
+      // Check both conditions: status is active OR userCount is 2 (in case status update is delayed)
+      if (userCount >= 2 && (status === 'active' || status === 'waiting') && onRoomReady) {
+        // If status is still 'waiting' but both users are joined, update it
+        if (status === 'waiting') {
+          console.log('✅ SkipOnFirebase: Both users joined but status still waiting, updating...');
+          const statusRef = ref(this.db, `skipOnRooms/${roomId}/status`);
+          set(statusRef, 'active').catch((error) => {
+            console.error('❌ SkipOnFirebase: Error updating room status:', error);
+          });
+        }
         console.log('✅ SkipOnFirebase: Room is ready - both users joined');
         onRoomReady();
       }

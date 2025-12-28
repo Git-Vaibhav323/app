@@ -881,7 +881,72 @@ async def skip_match(
     logger.info(f"🔍 Skip On: Queue contents: {[u['userId'] for u in skip_matchmaking_queue]}")
     logger.info(f"🔍 Skip On: Current user: {userId}")
     
-    # Check for matches FIRST, before any queue manipulation
+    # FIRST: Check for existing rooms with only one user (waiting for a partner)
+    # This handles the case where a room was created but the second user never joined
+    waiting_room = None
+    waiting_room_id = None
+    waiting_user_id = None
+    waiting_user_is_guest = False
+    
+    for room_id, room_data in skip_active_rooms.items():
+        # Check if room has only one user (waiting for partner)
+        user1 = room_data.get('user1Id')
+        user2 = room_data.get('user2Id')
+        
+        # Room is waiting if it has user1 but no user2, or vice versa
+        if user1 and not user2:
+            waiting_room = room_data
+            waiting_room_id = room_id
+            waiting_user_id = user1
+            waiting_user_is_guest = room_data.get('user1IsGuest', False)
+            logger.info(f"🔍 Skip On: Found waiting room {room_id} with user {user1}")
+            break
+        elif user2 and not user1:
+            waiting_room = room_data
+            waiting_room_id = room_id
+            waiting_user_id = user2
+            waiting_user_is_guest = room_data.get('user2IsGuest', False)
+            logger.info(f"🔍 Skip On: Found waiting room {room_id} with user {user2}")
+            break
+    
+    # If we found a waiting room, match the new user to it
+    if waiting_room and waiting_user_id and waiting_user_id != userId:
+        logger.info(f"🔍 Skip On: Matching {userId} to existing waiting room {waiting_room_id} with user {waiting_user_id}")
+        
+        # Update the room to include the second user
+        if not waiting_room.get('user1Id'):
+            waiting_room['user1Id'] = userId
+            waiting_room['user1IsGuest'] = isGuest
+        elif not waiting_room.get('user2Id'):
+            waiting_room['user2Id'] = userId
+            waiting_room['user2IsGuest'] = isGuest
+        
+        # Update mappings
+        skip_user_to_room[userId] = waiting_room_id
+        skip_active_rooms[waiting_room_id] = waiting_room
+        
+        # Remove from queue if present
+        skip_matchmaking_queue[:] = [u for u in skip_matchmaking_queue if u['userId'] != userId]
+        skip_matchmaking_queue[:] = [u for u in skip_matchmaking_queue if u['userId'] != waiting_user_id]
+        
+        logger.info(f"✅ Skip On match: User {userId} joined existing room {waiting_room_id} with {waiting_user_id}")
+        
+        # Get partner name
+        partnerName = "Someone"
+        if not waiting_user_is_guest:
+            partnerName = f"User {waiting_user_id[:8]}"
+        else:
+            partnerName = f"Guest {waiting_user_id[:8]}"
+        
+        return {
+            "status": "matched",
+            "roomId": waiting_room_id,
+            "partnerId": waiting_user_id,
+            "partnerName": partnerName,
+            "isPartnerGuest": waiting_user_is_guest
+        }
+    
+    # Check for matches in queue FIRST, before any queue manipulation
     # Filter out current user from queue check (they shouldn't be there, but safety check)
     available_partners = [u for u in skip_matchmaking_queue if u['userId'] != userId]
     
@@ -939,8 +1004,24 @@ async def skip_match(
         logger.info(f"✅ Skip On: Response: {response}")
         return response
     else:
-        # No one waiting - check if we're already in queue
+        # No one waiting in queue and no waiting rooms
+        # Check if we're already in queue
         alreadyInQueue = any(u['userId'] == userId for u in skip_matchmaking_queue)
+        
+        # Check if user already has a room (waiting for partner)
+        user_has_waiting_room = userId in skip_user_to_room
+        if user_has_waiting_room:
+            existing_room_id = skip_user_to_room[userId]
+            if existing_room_id in skip_active_rooms:
+                existing_room = skip_active_rooms[existing_room_id]
+                # Check if room only has one user (waiting for partner)
+                user1 = existing_room.get('user1Id')
+                user2 = existing_room.get('user2Id')
+                if (user1 == userId and not user2) or (user2 == userId and not user1):
+                    logger.info(f"🔍 Skip On: User {userId} already has waiting room {existing_room_id}, returning searching")
+                    return {
+                        "status": "searching"
+                    }
         
         if not alreadyInQueue:
             # Add to queue
@@ -952,19 +1033,6 @@ async def skip_match(
             logger.info(f"🔍 Skip On: User {userId} added to queue (queue length: {len(skip_matchmaking_queue)})")
         else:
             logger.info(f"🔍 Skip On: User {userId} already in queue (queue length: {len(skip_matchmaking_queue)})")
-        
-        # Remove user from queue if they're there (cleanup stale entries)
-        # This happens AFTER we've checked for matches
-        skip_matchmaking_queue[:] = [u for u in skip_matchmaking_queue if u['userId'] != userId]
-        
-        # Re-add to queue if not already there
-        if not alreadyInQueue:
-            skip_matchmaking_queue.append({
-                "userId": userId,
-                "isGuest": isGuest,
-                "timestamp": datetime.utcnow().isoformat()
-            })
-            logger.info(f"🔍 Skip On: User {userId} added to queue (queue length: {len(skip_matchmaking_queue)})")
         
         logger.info(f"🔍 Skip On: Returning searching response")
         response = {
