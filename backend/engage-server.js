@@ -56,7 +56,7 @@ app.get('/', (req, res) => {
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
-    namespaces: ['/watch-along', '/play-along', '/sing-along'],
+    namespaces: ['/watch-along', '/play-along', '/sing-along', '/video-call'],
     redis: redisClient?.isReady ? 'connected' : 'disconnected'
   });
 });
@@ -65,7 +65,7 @@ app.get('/health', (req, res) => {
 app.get('/socket.io-test', (req, res) => {
   res.json({ 
     message: 'Socket.IO server is running',
-    namespaces: ['/watch-along', '/play-along', '/sing-along'],
+    namespaces: ['/watch-along', '/play-along', '/sing-along', '/video-call'],
     transports: ['websocket', 'polling']
   });
 });
@@ -567,6 +567,89 @@ function isAuthenticated(socket) {
 function getUserId(socket) {
   return socket.handshake.auth?.userId || socket.handshake.auth?.token || socket.id;
 }
+
+// ====================================
+// VIDEO CALL (WEBRTC SIGNALING) NAMESPACE
+// ====================================
+const videoCallNamespace = io.of('/video-call');
+
+videoCallNamespace.use((socket, next) => {
+  // Allow both guests and authed users for Skip On
+  next();
+});
+
+videoCallNamespace.on('connection', (socket) => {
+  const userId = getUserId(socket);
+  const transport = socket.conn.transport.name;
+  console.log(`[VIDEO-CALL] ✅ User ${userId} connected (socket: ${socket.id}, transport: ${transport})`);
+
+  socket.emit('connected', { socketId: socket.id, userId });
+
+  socket.on('join_room', ({ roomId }) => {
+    if (!roomId) {
+      socket.emit('error', { message: 'roomId is required' });
+      return;
+    }
+
+    socket.join(roomId);
+    socket.data.roomId = roomId;
+    socket.data.userId = userId;
+
+    console.log(`[VIDEO-CALL] ✅ User ${userId} joined room ${roomId}`);
+    socket.emit('room_joined', { roomId, userId });
+    socket.to(roomId).emit('participant_joined', { roomId, userId });
+
+    const room = videoCallNamespace.adapter.rooms.get(roomId);
+    if (room && room.size >= 2) {
+      videoCallNamespace.to(roomId).emit('room_ready', { roomId });
+    }
+  });
+
+  socket.on('webrtc_offer', ({ roomId, sdp }) => {
+    if (!roomId || !sdp) {
+      socket.emit('error', { message: 'roomId and sdp are required' });
+      return;
+    }
+    socket.to(roomId).emit('webrtc_offer', { roomId, fromUserId: userId, sdp });
+  });
+
+  socket.on('webrtc_answer', ({ roomId, sdp }) => {
+    if (!roomId || !sdp) {
+      socket.emit('error', { message: 'roomId and sdp are required' });
+      return;
+    }
+    socket.to(roomId).emit('webrtc_answer', { roomId, fromUserId: userId, sdp });
+  });
+
+  socket.on('webrtc_ice_candidate', ({ roomId, candidate }) => {
+    if (!roomId || !candidate) {
+      socket.emit('error', { message: 'roomId and candidate are required' });
+      return;
+    }
+    socket.to(roomId).emit('webrtc_ice_candidate', { roomId, fromUserId: userId, candidate });
+  });
+
+  socket.on('webrtc_hangup', ({ roomId }) => {
+    if (!roomId) {
+      socket.emit('error', { message: 'roomId is required' });
+      return;
+    }
+    socket.to(roomId).emit('webrtc_hangup', { roomId, fromUserId: userId });
+    socket.leave(roomId);
+    socket.data.roomId = null;
+  });
+
+  socket.on('disconnect', (reason) => {
+    const roomId = socket.data.roomId;
+    if (roomId) {
+      console.log(`[VIDEO-CALL] ❌ User ${userId} disconnected from room ${roomId}: ${reason}`);
+      socket.to(roomId).emit('participant_left', { roomId, userId });
+      socket.to(roomId).emit('webrtc_hangup', { roomId, fromUserId: userId });
+    } else {
+      console.log(`[VIDEO-CALL] ❌ User ${userId} disconnected: ${reason}`);
+    }
+  });
+});
 
 // ====================================
 // WATCH ALONG NAMESPACE
